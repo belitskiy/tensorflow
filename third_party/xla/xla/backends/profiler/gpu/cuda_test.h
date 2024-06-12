@@ -48,6 +48,11 @@ void MemCopyP2PImplicit();
 // Copies a few bytes of memory from device 0 to device 1.
 void MemCopyP2PExplicit();
 
+// Create a simple cuda graph, instantiate it and execute it.
+// Return true if the cuda version is newer so all related cuda graph APIs are
+// available, especially for activity graph tracing after 11.7.
+bool CudaGraphCreateAndExecute();
+
 }  // namespace test
 }  // namespace profiler
 }  // namespace xla
