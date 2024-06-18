@@ -25,6 +25,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "absl/log/absl_log.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "llvm/Support/CommandLine.h"
@@ -44,6 +45,7 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
 #include "tensorflow/core/platform/init_main.h"
 #include "tensorflow/core/platform/logging.h"
+#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/delegates/flex/delegate.h"
 #include "tensorflow/lite/kernels/register.h"
 #include "tensorflow/lite/optional_debug_tools.h"
@@ -87,8 +89,10 @@ static std::string TfLiteTensorString(const TfLiteTensor& tensor) {
       return TfLiteTypedTensorString<int64_t>(tensor);
     case kTfLiteFloat32:
       return TfLiteTypedTensorString<float>(tensor);
-    default:
-      LOG(QFATAL) << "Unsupported type: " << TfLiteTypeGetName(tensor.type);
+    default: {
+      ABSL_LOG(ERROR) << "Unsupported type: " << TfLiteTypeGetName(tensor.type);
+      return "<null>";
+    }
   }
 }
 
@@ -98,8 +102,8 @@ int main(int argc, char** argv) {
 
   auto file_or_err = llvm::MemoryBuffer::getFileOrSTDIN(input_filename.c_str());
   if (std::error_code error = file_or_err.getError()) {
-    LOG(ERROR) << argv[0] << ": could not open input file '" << input_filename
-               << "': " << error.message() << "\n";
+    ABSL_LOG(ERROR) << argv[0] << ": could not open input file '"
+                    << input_filename << "': " << error.message() << "\n";
     return 1;
   }
 
@@ -117,9 +121,15 @@ int main(int argc, char** argv) {
 
   // TODO(jpienaar): Expand to support inputs.
   mlir::func::FuncOp main = module->lookupSymbol<mlir::func::FuncOp>("main");
-  QCHECK(main) << "No 'main' function specified.";
-  if (main.getFunctionType().getNumInputs() != 0)
-    LOG(QFATAL) << "NYI: Only nullary functions supported.";
+
+  if (!main) {
+    ABSL_LOG(ERROR) << "No 'main' function specified.";
+    return 1;
+  }
+  if (main.getFunctionType().getNumInputs() != 0) {
+    ABSL_LOG(ERROR) << "Only nullary functions supported.";
+    return 1;
+  }
 
   // Convert to flatbuffer.
   std::string serialized_flatbuffer;
@@ -137,15 +147,15 @@ int main(int argc, char** argv) {
                                                serialized_flatbuffer.size());
   tflite::ops::builtin::BuiltinOpResolver builtins;
   std::unique_ptr<tflite::Interpreter> interpreter;
-  QCHECK(tflite::InterpreterBuilder(*model, builtins)(&interpreter) ==
-         kTfLiteOk);
-  QCHECK(interpreter->AllocateTensors() == kTfLiteOk);
-  QCHECK(interpreter->Invoke() == kTfLiteOk);
+  if (tflite::InterpreterBuilder(*model, builtins)(&interpreter) != kTfLiteOk)
+    return 1;
+  if (interpreter->AllocateTensors() != kTfLiteOk) return 1;
+  if (interpreter->Invoke() != kTfLiteOk) return 1;
 
   // Print the resulting outputs.
   // TODO(jpienaar): Allow specifying output stream/file.
-  QCHECK(interpreter->outputs().size() ==
-         main.getFunctionType().getNumResults());
+  if (interpreter->outputs().size() != main.getFunctionType().getNumResults())
+    return 1;
   for (int index : interpreter->outputs()) {
     const auto& out = *interpreter->tensor(index);
     // Print name if named.

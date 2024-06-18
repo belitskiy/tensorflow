@@ -26,7 +26,7 @@ filegroup(
     testonly = True,
     data = [
         "//tensorflow/compiler/mlir:tf-opt",
-        "//tensorflow/compiler/mlir/lite:mlir-tflite-runner",
+        "//tensorflow/lite:mlir-tflite-runner",
         "@llvm-project//llvm:FileCheck",
         "@llvm-project//llvm:not",
     ],

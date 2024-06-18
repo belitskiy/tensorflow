@@ -1,7 +1,7 @@
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
-load("//tensorflow:tensorflow.bzl", "if_google", "if_not_windows", "if_oss", "tf_cc_test")
+load("//tensorflow:tensorflow.bzl", "if_google", "if_not_windows", "if_oss", "tf_cc_binary", "tf_cc_test")
 load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_portable")
 load("//tensorflow/lite:build_def.bzl", "tflite_cc_shared_object", "tflite_copts", "tflite_copts_warnings", "tflite_linkopts_no_undefined", "tflite_self_contained_libs_test_suite")
 load("//tensorflow/lite:special_rules.bzl", "SPECIAL_RULES_DEPS", "internal_visibility_allowlist", "tflite_internal_cc_3p_api_deps_src_all_visibility_allowlist", "tflite_portable_test_suite")
@@ -1475,6 +1475,32 @@ cc_library_with_tflite(
     compatible_with = get_compatible_with_portable(),
     visibility = [
         "//visibility:public",
+    ],
+)
+
+tf_cc_binary(
+    name = "mlir-tflite-runner",
+    srcs = [
+        "mlir_tflite_runner.cc",
+    ],
+    deps = [
+        ":framework",
+        "//tensorflow/compiler/mlir/lite:flatbuffer_translate_lib",
+        "//tensorflow/compiler/mlir/lite:flatbuffer_translate_registration",
+        "//tensorflow/compiler/mlir/lite:tensorflow_lite",
+        "//tensorflow/compiler/mlir/tensorflow",
+        "//tensorflow/core:lib",
+        "//tensorflow/core/platform:logging",
+        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/delegates/flex:delegate",
+        "//tensorflow/lite/kernels:builtin_ops",
+        "@com_google_absl//absl/log:absl_log",
+        "@com_google_absl//absl/strings",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Parser",
     ],
 )
 
