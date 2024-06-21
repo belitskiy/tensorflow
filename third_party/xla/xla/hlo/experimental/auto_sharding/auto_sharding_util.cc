@@ -1416,8 +1416,7 @@ absl::Status FixMixedMeshShapeReshardingGetTupleElement(
   HloInstruction* replace_with =
       ReshardTensor(inst, src_sharding, dst_sharding, device_mesh);
   inst->set_sharding(src_sharding);
-  size_t size =
-      GetInstructionSize(replace_with->shape()) / (1024 * 1024 * 1024);
+  size_t size = ByteSizeOfShape(replace_with->shape()) / (1024 * 1024 * 1024);
   if (size > 1) {
     LOG(WARNING) << "Large reshape instruction inserted (operand of "
                  << inst->name() << ") with size " << size
@@ -1484,8 +1483,7 @@ absl::Status FixMixedMeshShapeResharding(HloInstruction* inst, int operand_num,
       }
     }
 
-    size_t size =
-        GetInstructionSize(replace_with->shape()) / (1024 * 1024 * 1024);
+    size_t size = ByteSizeOfShape(replace_with->shape()) / (1024 * 1024 * 1024);
     if (size > 1) {
       LOG(WARNING) << "Large reshape instruction inserted (operand of "
                    << inst->name() << ") with size " << size
@@ -1854,50 +1852,58 @@ std::vector<int64_t> VectorGreaterThanOneElementIndices(
   return result;
 }
 
-int64_t GetInstructionSize(const Shape& shape) {
-  if (shape.IsTuple()) {
-    int64_t size = 0;
-    for (const Shape& subshape : shape.tuple_shapes()) {
-      size += GetInstructionSize(subshape);
-    }
-    return size;
-  }
-  return GetBytes(shape);
+int64_t ByteSizeOfShapeWithSharding(const Shape& original_shape,
+                                    std::optional<HloSharding> sharding) {
+  int64_t size = 0;
+  ShapeUtil::ForEachSubshape(
+      original_shape, [&size, &sharding, &original_shape](
+                          const Shape& subshape, const ShapeIndex& index) {
+        if (subshape.IsTuple()) {
+          size += ShapeUtil::ByteSizeOf(
+              subshape, /*pointer_size=*/kAutoShardingPointerSize);
+        } else if (subshape.IsArray()) {
+          if (sharding) {
+            const HloSharding& sub_sharding =
+                sharding->IsTuple()
+                    ? sharding->GetSubSharding(original_shape, index)
+                    : *sharding;
+            size += ShapeUtil::ByteSizeOf(sub_sharding.TileShape(subshape));
+          } else {
+            size += ShapeUtil::ByteSizeOf(subshape);
+          }
+        } else if (subshape.IsToken()) {
+          size += 0;
+        } else {
+          size += kAutoShardingPointerSize;
+        }
+      });
+  return size;
 }
 
 int64_t GetShardedInstructionSize(const Shape& shape, int64_t num_devices,
                                   std::optional<HloSharding> sharding) {
-  if (sharding && sharding->IsUnknown()) {
-    sharding = HloSharding::Replicate();
+  if (sharding) {
+    return ByteSizeOfShapeWithSharding(shape, sharding);
   }
-  if (shape.IsTuple()) {
-    int64_t size = 0;
-    for (size_t i = 0; i < shape.tuple_shapes_size(); i++) {
-      Shape subshape = shape.tuple_shapes().at(i);
-      size += GetShardedInstructionSize(
-          subshape,
-          sharding.has_value()
-              ? sharding
-                    ->GetSubSharding(shape, ShapeIndex{static_cast<int64_t>(i)})
-                    .NumTiles()
-              : num_devices);
-    }
-    return size;
-  }
-  if (sharding && sharding->NumTiles() > 0) {
-    return GetBytes(shape) / sharding->NumTiles();
-  }
-  bool shardable = false;
-  for (const auto dim : shape.dimensions()) {
-    if (dim >= num_devices) {
-      shardable = true;
-      break;
-    }
-  }
-  if (shardable) {
-    return GetBytes(shape) / num_devices;
-  }
-  return GetBytes(shape);
+
+  int64_t size = 0;
+  ShapeUtil::ForEachSubshape(
+      shape,
+      [&size, &num_devices](const Shape& subshape, const ShapeIndex& index) {
+        if (subshape.IsTuple()) {
+          size += ShapeUtil::ByteSizeOf(
+              subshape, /*pointer_size=*/kAutoShardingPointerSize);
+        } else if (absl::c_any_of(subshape.dimensions(),
+                                  [num_devices](const int64_t dim) {
+                                    return dim >= num_devices;
+                                  })) {
+          size += ByteSizeOfShape(subshape) / num_devices;
+        } else {
+          size += ByteSizeOfShape(subshape);
+        }
+      });
+
+  return size;
 }
 
 HloInstruction* FindInstruction(
