@@ -20,6 +20,7 @@ limitations under the License.
 #include <string>
 #include <utility>
 
+#include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
 #include "xla/hlo/ir/hlo_casting_utils.h"
@@ -247,7 +248,7 @@ absl::StatusOr<bool> HloCSE::Run(
   auto cse_equal = [&](const CseKey& lhs, const CseKey& rhs) {
     return lhs.hlo->IdenticalIgnoringCommutativeOperandOrder(
         *rhs.hlo, eq_instructions, eq_computations, is_layout_sensitive_,
-        /*sharding_sensitive=*/true);
+        is_sharding_sensitive_);
   };
 
   for (auto* computation : module->computations(execution_threads)) {
@@ -255,12 +256,14 @@ absl::StatusOr<bool> HloCSE::Run(
       continue;
     }
 
-    TF_ASSIGN_OR_RETURN(
-        bool combined,
-        is_layout_sensitive_
-            ? CombineConstants<true>(computation, only_scalars_)
-            : CombineConstants<false>(computation, only_scalars_));
-    changed |= combined;
+    if (!only_instructions_) {
+      TF_ASSIGN_OR_RETURN(
+          bool combined,
+          is_layout_sensitive_
+              ? CombineConstants<true>(computation, only_scalars_)
+              : CombineConstants<false>(computation, only_scalars_));
+      changed |= combined;
+    }
 
     // HLO instructions are grouped into equivalency classes by using the
     // cse_equal predicate defined above. This set holds a representative
@@ -278,6 +281,11 @@ absl::StatusOr<bool> HloCSE::Run(
       }
       // Skip instructions which have side effects.
       if (instruction->HasSideEffect()) {
+        continue;
+      }
+      // Skip instructions that are not listed in the opcodes.
+      if (only_instructions_ &&
+          !absl::c_linear_search(*opcodes_, instruction->opcode())) {
         continue;
       }
 

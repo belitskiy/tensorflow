@@ -31,14 +31,18 @@ class HloCSE : public HloModulePass {
   // transformation. Otherwise, layout is ignored.
   // If ignore_control_dependencies is true, the pass will ignore control deps
   // when replacing instructions with their equivalents.
-  explicit HloCSE(bool is_layout_sensitive,
-                  bool only_fusion_computations = false,
-                  bool ignore_control_dependencies = false,
-                  bool only_scalars = false)
+  explicit HloCSE(
+      bool is_layout_sensitive, bool only_fusion_computations = false,
+      bool ignore_control_dependencies = false, bool only_scalars = false,
+      bool is_sharding_sensitive = true,
+      const std::optional<std::vector<HloOpcode>>& opcodes = std::nullopt)
       : is_layout_sensitive_(is_layout_sensitive),
         only_fusion_computations_(only_fusion_computations),
         ignore_control_dependencies_(ignore_control_dependencies),
-        only_scalars_(only_scalars) {}
+        only_scalars_(only_scalars),
+        is_sharding_sensitive_(is_sharding_sensitive),
+        only_instructions_(opcodes.has_value()),
+        opcodes_(opcodes) {}
   ~HloCSE() override = default;
   absl::string_view name() const override { return "cse"; }
 
@@ -54,6 +58,9 @@ class HloCSE : public HloModulePass {
   const bool only_fusion_computations_;
   const bool ignore_control_dependencies_;
   const bool only_scalars_;
+  const bool is_sharding_sensitive_;
+  const bool only_instructions_;
+  const std::optional<std::vector<HloOpcode>> opcodes_;
 };
 
 }  // namespace xla
