@@ -22,6 +22,7 @@ cc_library(
     visibility = ["//tensorflow/compiler/mlir/lite:__subpackages__"],
     deps = [
         ":debug_options_proto_cc",
+        "//tensorflow/compiler/mlir/lite/metrics:error_collector_inst",
         "//tensorflow/core:portable_gif_internal",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/status",

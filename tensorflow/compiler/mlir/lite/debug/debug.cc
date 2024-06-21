@@ -41,6 +41,7 @@ limitations under the License.
 #include "mlir/Pass/PassManager.h"  // from @llvm-project
 #include "re2/re2.h"  // IWYU pragma: keep
 #include "tensorflow/compiler/mlir/lite/debug/debug_options.pb.h"
+#include "tensorflow/compiler/mlir/lite/metrics/error_collector_inst.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tsl/lib/io/buffered_file.h"
 #include "tsl/platform/env.h"
@@ -342,6 +343,10 @@ void InitPassManager(mlir::PassManager& pm,
   if (options.enable_timing()) {
     pm.enableTiming();
   }
+
+  pm.addInstrumentation(
+      std::make_unique<mlir::TFL::ErrorCollectorInstrumentation>(
+          pm.getContext()));
 }
 
 }  // namespace tensorflow
