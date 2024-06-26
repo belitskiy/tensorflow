@@ -709,6 +709,13 @@ class WhileLoopAnalysis {
   int64_t GetMaxPipeliningPerLoop() const { return max_pipelining_per_loop_; }
 
   bool ComputeLoopStatistics();
+  std::optional<std::pair<int64_t, int64_t>> IsSupportedDynamicUpdateSlice(
+      HloDynamicUpdateSliceInstruction* dyn_update, HloInstruction* instr,
+      std::vector<HloInstruction*>& formatting_ops,
+      CollectivePipeliner::PipeliningDirection direction,
+      int64_t level_to_operate_on,
+      absl::flat_hash_map<int64_t, int64_t>& parameter_gtes_count,
+      absl::flat_hash_map<const HloInstruction*, Range>& index_ranges);
   void CollectCollectivesToMove(
       int64_t level_to_operate_on,
       CollectivePipeliner::PipeliningDirection direction,
@@ -849,6 +856,109 @@ bool WhileLoopAnalysis::ComputeLoopStatistics() {
   return true;
 }
 
+std::optional<std::pair<int64_t, int64_t>>
+WhileLoopAnalysis::IsSupportedDynamicUpdateSlice(
+    HloDynamicUpdateSliceInstruction* dyn_update, HloInstruction* instr,
+    std::vector<HloInstruction*>& formatting_ops,
+    CollectivePipeliner::PipeliningDirection direction,
+    int64_t level_to_operate_on,
+    absl::flat_hash_map<int64_t, int64_t>& parameter_gtes_count,
+    absl::flat_hash_map<const HloInstruction*, Range>& index_ranges) {
+  HloComputation* while_body = while_->while_body();
+  const HloInstruction* loop_parameter =
+      while_body->parameter_instructions()[0];
+  std::optional<int64_t> sliced_dim = GetSlicedDimension(dyn_update);
+  if (!sliced_dim.has_value()) {
+    VLOG(5) << "Skipping " << instr->name()
+            << " because couldn't find sliced dimension";
+    return std::nullopt;
+  }
+  if (direction == CollectivePipeliner::PipeliningDirection::kForwardSink &&
+      (*sliced_dim != 0 || dyn_update->shape().dimensions(0) !=
+                               loop_iteration_count_->GetUnsignedValue())) {
+    VLOG(5) << "Skipping " << instr->name()
+            << " because number of iteration of the loop doesn't match "
+               "slices being inserted or slice dim is not 0. slice_dim = "
+            << *sliced_dim
+            << " loop count = " << loop_iteration_count_->GetUnsignedValue();
+  }
+  if (!process_different_sized_options_) {
+    if (!formatting_ops.empty()) {
+      if (instr->operand(0)->shape() != formatting_ops.back()->shape()) {
+        return std::nullopt;
+      }
+      auto dependencies_to_pipeline = CollectDependenciesToPipeline(
+          instr, absl::MakeConstSpan(formatting_ops));
+      bool skip_because_not_same_size = false;
+      // If any instruction in the dependency chain is not of the same size
+      // then we abort for this instruction.
+      for (auto* dependency : dependencies_to_pipeline) {
+        if (ShapeUtil::IsEffectiveScalar(dependency->shape())) {
+          skip_because_not_same_size = true;
+          break;
+        }
+      }
+      if (skip_because_not_same_size) {
+        return std::nullopt;
+      }
+    } else if (instr->operand(0)->shape() != instr->shape()) {
+      return std::nullopt;
+    }
+  }
+  const HloInstruction* to_insert_into = dyn_update->operand(0);
+  if (level_to_operate_on == 0 &&
+      (to_insert_into->opcode() != HloOpcode::kGetTupleElement ||
+       to_insert_into->operand(0) != loop_parameter)) {
+    VLOG(5) << "Skipping " << instr->name()
+            << " because slice to insert into is not a GTE from input "
+               "parameter "
+            << to_insert_into->ToString();
+    return std::nullopt;
+  }
+  // If Level is > 0 then we already did our analysis in the previous
+  // iteration for safeness of this index to transform.
+  if (level_to_operate_on == 0) {
+    if (to_insert_into->opcode() == HloOpcode::kGetTupleElement) {
+      // GTE for this parameter is not CSEd. Abort because we don't analyze
+      // every single use from other GTEs.
+      if (parameter_gtes_count.at(to_insert_into->tuple_index()) != 1) {
+        VLOG(5) << "Skipping " << instr->name()
+                << " because there are multiple parameter GTEs for this slice";
+        return std::nullopt;
+      }
+    }
+    HloInstruction* dyn_update_idx = dyn_update->mutable_operand(
+        dyn_update->first_index_operand_number() + *sliced_dim);
+    if (level_to_operate_on == 0 &&
+        !CheckParameterUsageIsCompatible(to_insert_into, dyn_update,
+                                         dyn_update_idx, *sliced_dim)) {
+      VLOG(5) << "Skipping " << instr->name()
+              << " because parameter usage doesn't follow the expected pattern";
+      return std::nullopt;
+    }
+    if (!AllIndicesConstantsExceptOne(
+            dyn_update,
+            dyn_update->first_index_operand_number() + *sliced_dim)) {
+      VLOG(5) << "Skipping " << instr->name()
+              << " because update slicing doesn't match expectation";
+      return std::nullopt;
+    }
+    if (!CheckIndexIsMonotonic(dyn_update_idx, index_ranges)) {
+      VLOG(5) << "Skipping " << instr->name()
+              << " because update index is not monotonic";
+      return std::nullopt;
+    }
+  }
+  std::optional<int64_t> output_idx = FindOutputIndexForDynamicUpdateSlice(
+      dyn_update, while_body->root_instruction());
+  if (!output_idx.has_value()) {
+    VLOG(5) << "Skipping " << instr->name()
+            << " because couldn't find unique output index for insertion";
+    return std::nullopt;
+  }
+  return std::make_pair(*sliced_dim, *output_idx);
+}
+
 void WhileLoopAnalysis::CollectCollectivesToMove(
     int64_t level_to_operate_on,
     CollectivePipeliner::PipeliningDirection direction,
@@ -927,100 +1037,15 @@ void WhileLoopAnalysis::CollectCollectivesToMove(
                "computation";
         continue;
       }
-      std::optional<int64_t> sliced_dim = GetSlicedDimension(dyn_update);
-      if (!sliced_dim.has_value()) {
-        VLOG(5) << "Skipping " << instr->name()
-                << " because couldn't find sliced dimension";
+      std::optional<std::pair<int64_t, int64_t>> maybe_dus_info =
+          IsSupportedDynamicUpdateSlice(dyn_update, instr, formatting_ops,
+                                        direction, level_to_operate_on,
+                                        parameter_gtes_count, index_ranges);
+      if (!maybe_dus_info.has_value()) {
         continue;
       }
-      if (direction == CollectivePipeliner::PipeliningDirection::kForwardSink &&
-          (*sliced_dim != 0 || dyn_update->shape().dimensions(0) !=
-                                   loop_iteration_count_->GetUnsignedValue())) {
-        VLOG(5) << "Skipping " << instr->name()
-                << " because number of iteration of the loop doesn't match "
-                   "slices being inserted or slice dim is not 0. slice_dim = "
-                << *sliced_dim << " loop count = "
-                << loop_iteration_count_->GetUnsignedValue();
-      }
-      if (!process_different_sized_options_) {
-        if (!formatting_ops.empty()) {
-          if (instr->operand(0)->shape() != formatting_ops.back()->shape()) {
-            continue;
-          }
-          auto dependencies_to_pipeline = CollectDependenciesToPipeline(
-              instr, absl::MakeConstSpan(formatting_ops));
-          bool skip_because_not_same_size = false;
-          // If any instruction in the dependency chain is not of the same size
-          // then we abort for this instruction.
-          for (auto* dependency : dependencies_to_pipeline) {
-            if (ShapeUtil::IsEffectiveScalar(dependency->shape())) {
-              skip_because_not_same_size = true;
-              break;
-            }
-          }
-          if (skip_because_not_same_size) {
-            continue;
-          }
-        } else if (instr->operand(0)->shape() != instr->shape()) {
-          continue;
-        }
-      }
-      const HloInstruction* to_insert_into = dyn_update->operand(0);
-      if (level_to_operate_on == 0 &&
-          (to_insert_into->opcode() != HloOpcode::kGetTupleElement ||
-           to_insert_into->operand(0) != loop_parameter)) {
-        VLOG(5) << "Skipping " << instr->name()
-                << " because slice to insert into is not a GTE from input "
-                   "parameter "
-                << to_insert_into->ToString();
-        continue;
-      }
-      if (dyn_update->user_count() != 1) {
-        continue;
-      }
-      // If Level is > 0 then we already did our analysis in the previous
-      // iteration for safeness of this index to transform.
-      if (level_to_operate_on == 0) {
-        if (to_insert_into->opcode() == HloOpcode::kGetTupleElement) {
-          // GTE for this parameter is not CSEd. Abort because we don't analyze
-          // every single use from other GTEs.
-          if (parameter_gtes_count.at(to_insert_into->tuple_index()) != 1) {
-            VLOG(5)
-                << "Skipping " << instr->name()
-                << " because there are multiple parameter GTEs for this slice";
-            continue;
-          }
-        }
-        HloInstruction* dyn_update_idx = dyn_update->mutable_operand(
-            dyn_update->first_index_operand_number() + *sliced_dim);
-        if (level_to_operate_on == 0 &&
-            !CheckParameterUsageIsCompatible(to_insert_into, dyn_update,
-                                             dyn_update_idx, *sliced_dim)) {
-          VLOG(5)
-              << "Skipping " << instr->name()
-              << " because parameter usage doesn't follow the expected pattern";
-          continue;
-        }
-        if (!AllIndicesConstantsExceptOne(
-                dyn_update,
-                dyn_update->first_index_operand_number() + *sliced_dim)) {
-          VLOG(5) << "Skipping " << instr->name()
-                  << " because update slicing doesn't match expectation";
-          continue;
-        }
-        if (!CheckIndexIsMonotonic(dyn_update_idx, index_ranges)) {
-          VLOG(5) << "Skipping " << instr->name()
-                  << " because update index is not monotonic";
-          continue;
-        }
-      }
-      std::optional<int64_t> output_idx = FindOutputIndexForDynamicUpdateSlice(
-          dyn_update, while_body->root_instruction());
-      if (!output_idx.has_value()) {
-        VLOG(5) << "Skipping " << instr->name()
-                << " because couldn't find unique output index for insertion";
-        continue;
-      }
+      int64_t sliced_dim = maybe_dus_info->first;
+      int64_t output_idx = maybe_dus_info->second;
       auto merge_as_formatting =
           [this, &instruction_order](
               absl::flat_hash_map<const HloInstruction*, int64_t>::iterator it,
@@ -1057,7 +1082,7 @@ void WhileLoopAnalysis::CollectCollectivesToMove(
       }
       index_per_dyn_update_slice[dyn_update] = move_infos_.size();
       move_infos_.push_back({instr, dyn_update, std::move(formatting_ops),
-                             *sliced_dim, *output_idx});
+                             sliced_dim, output_idx});
     } else {
       CHECK_EQ(direction, CollectivePipeliner::PipeliningDirection::kBackward);
       auto chain_collected = CollectChainsToPushBackwards(
