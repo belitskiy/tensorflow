@@ -686,7 +686,7 @@ static int EagerTensor_settensor_shape(EagerTensor* self, PyObject* value,
 // Function `_copy_to_device`.
 static PyObject* EagerTensor_copy_to_device(EagerTensor* self, PyObject* args,
                                             PyObject* kwds) {
-  if (!_PyArg_NoKeywords("copy_to_device", kwds)) return nullptr;
+  if (!PyArg_NoKeywords("copy_to_device", kwds)) return nullptr;
 
   const char* device_name = nullptr;
   if (!PyArg_ParseTuple(args, "O&:copy_to_device", ConvertDeviceName,
@@ -874,7 +874,7 @@ static int EagerTensor_traverse(PyObject* self, visitproc visit, void* arg) {
   PyObject*& dict = *_PyObject_GetDictPtr(self);
   Py_VISIT(dict);
 #else
-  _PyObject_VisitManagedDict(self, visit, arg);
+  PyObject_VisitManagedDict(self, visit, arg);
 #endif  // PY_VERSION_HEX < 0x030C0000
   Py_VISIT(((EagerTensor*)self)->handle_data);
   Py_VISIT(((EagerTensor*)self)->tensor_shape);
@@ -897,7 +897,7 @@ extern int EagerTensor_clear(PyObject* self) {
   PyObject*& dict = *_PyObject_GetDictPtr(self);
   Py_CLEAR(dict);
 #else
-  _PyObject_ClearManagedDict(self);
+  PyObject_ClearManagedDict(self);
 #endif  // PY_VERSION_HEX < 0x030C0000
 
   Py_CLEAR(((EagerTensor*)self)->handle_data);
